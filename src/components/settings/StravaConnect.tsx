@@ -5,6 +5,7 @@ import { CheckCircle, RefreshCw, XCircle, Zap } from "react-feather"
 
 interface SyncResult {
   imported: number
+  matched: number  // planned workouts completed via Strava
   skipped: number
   total: number
   totalActivities: number
@@ -111,11 +112,24 @@ export function StravaConnect({
           {/* Sync result */}
           {syncResult && (
             <div className="rounded-xl bg-muted/50 p-3 space-y-1">
-              {syncResult.imported > 0 ? (
-                <p className="text-xs font-medium text-green-600 dark:text-green-400">
-                  ✓ Imported {syncResult.imported} run{syncResult.imported !== 1 ? "s" : ""}
-                  {syncResult.skipped > 0 ? ` · ${syncResult.skipped} already logged` : ""}
-                </p>
+              {(syncResult.imported > 0 || syncResult.matched > 0) ? (
+                <div className="space-y-0.5">
+                  {syncResult.matched > 0 && (
+                    <p className="text-xs font-medium text-green-600 dark:text-green-400">
+                      ✓ {syncResult.matched} planned workout{syncResult.matched !== 1 ? "s" : ""} completed from Strava
+                    </p>
+                  )}
+                  {syncResult.imported > 0 && (
+                    <p className="text-xs font-medium text-green-600 dark:text-green-400">
+                      ✓ {syncResult.imported} new run{syncResult.imported !== 1 ? "s" : ""} imported
+                    </p>
+                  )}
+                  {syncResult.skipped > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      {syncResult.skipped} already logged
+                    </p>
+                  )}
+                </div>
               ) : (
                 <p className="text-xs font-medium text-muted-foreground">
                   No new runs found

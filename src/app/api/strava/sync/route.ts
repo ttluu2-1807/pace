@@ -34,7 +34,6 @@ export async function POST(request: NextRequest) {
     try {
       const refreshed = await refreshStravaToken(connection.refresh_token)
       accessToken = refreshed.access_token
-
       await supabase
         .from("strava_connections")
         .update({
@@ -46,10 +45,7 @@ export async function POST(request: NextRequest) {
         .eq("user_id", user.id)
     } catch (err) {
       console.error("[Strava sync] Token refresh failed:", err)
-      return NextResponse.json(
-        { error: "Token refresh failed" },
-        { status: 401 }
-      )
+      return NextResponse.json({ error: "Token refresh failed" }, { status: 401 })
     }
   }
 
@@ -65,22 +61,13 @@ export async function POST(request: NextRequest) {
     activities = await fetchStravaActivities(accessToken, afterTimestamp, 100)
   } catch (err) {
     console.error("[Strava sync] Activity fetch failed:", err)
-    return NextResponse.json(
-      { error: "Failed to fetch activities" },
-      { status: 502 }
-    )
+    return NextResponse.json({ error: "Failed to fetch activities" }, { status: 502 })
   }
 
-  // Filter to runs only — cover all Strava run sport_types
-  const RUN_TYPES = new Set([
-    "Run", "TrailRun", "VirtualRun", "Treadmill",
-    "MountainBikeRide", // exclude — not a run
-  ])
-  const RUN_SPORT_TYPES = new Set([
-    "Run", "TrailRun", "VirtualRun", "Treadmill",
-  ])
+  // Filter to runs only
+  const RUN_SPORT_TYPES = new Set(["Run", "TrailRun", "VirtualRun", "Treadmill"])
   const runs = activities.filter(
-    (a) => RUN_SPORT_TYPES.has(a.sport_type) || (a.sport_type === "" && RUN_TYPES.has(a.type))
+    (a) => RUN_SPORT_TYPES.has(a.sport_type) || RUN_SPORT_TYPES.has(a.type)
   )
 
   // Fetch already-synced activity IDs to avoid duplicates
@@ -89,19 +76,18 @@ export async function POST(request: NextRequest) {
     .select("strava_activity_id")
     .eq("user_id", user.id)
 
-  const syncedIds = new Set(
-    (alreadySynced ?? []).map((r) => r.strava_activity_id)
-  )
+  const syncedIds = new Set((alreadySynced ?? []).map((r) => r.strava_activity_id))
 
-  // Fetch active plan (to associate workouts if date falls within plan)
+  // Fetch active plan — fallback to active=true if status column not yet migrated
   const { data: activePlan } = await supabase
     .from("training_plans")
     .select("id, start_date, end_date")
     .eq("user_id", user.id)
-    .eq("status", "active")
-    .single()
+    .eq("active", true)
+    .maybeSingle()
 
   let imported = 0
+  let matched = 0  // planned workouts updated with Strava actuals
   let skipped = 0
 
   for (const activity of runs) {
@@ -110,9 +96,48 @@ export async function POST(request: NextRequest) {
       continue
     }
 
-    // Check if a workout already exists on this date (manually logged)
     const activityDate = activity.start_date.split("T")[0]
-    const { data: existing } = await supabase
+    const distanceKm = Math.round((activity.distance / 1000) * 100) / 100
+    const durationMinutes = Math.round(activity.moving_time / 60)
+
+    // ── KEY IMPROVEMENT: match against a planned workout on this date ──
+    // Look for an incomplete planned workout on the same date
+    const { data: plannedWorkout } = await supabase
+      .from("workouts")
+      .select("id, type, title, plan_id")
+      .eq("user_id", user.id)
+      .eq("date", activityDate)
+      .eq("completed", false)
+      .eq("source", "manual")
+      .maybeSingle()
+
+    if (plannedWorkout) {
+      // Update the planned workout with Strava actuals — mark it done
+      const { error: updateError } = await supabase
+        .from("workouts")
+        .update({
+          completed: true,
+          actual_distance_km: distanceKm,
+          actual_duration_minutes: durationMinutes,
+          actual_avg_hr: activity.average_heartrate ?? null,
+          notes: `Completed via Strava · ${distanceKm}km in ${durationMinutes} min`,
+          source: "strava",
+        })
+        .eq("id", plannedWorkout.id)
+
+      if (!updateError) {
+        await supabase.from("strava_synced_activities").upsert({
+          user_id: user.id,
+          strava_activity_id: activity.id,
+          workout_id: plannedWorkout.id,
+        })
+        matched++
+        continue
+      }
+    }
+
+    // No planned workout — check if we already have a Strava import for this date
+    const { data: existingStrava } = await supabase
       .from("workouts")
       .select("id")
       .eq("user_id", user.id)
@@ -120,18 +145,17 @@ export async function POST(request: NextRequest) {
       .eq("source", "strava")
       .maybeSingle()
 
-    if (existing) {
-      // Already have a Strava workout for this day — mark as synced and skip
+    if (existingStrava) {
       await supabase.from("strava_synced_activities").upsert({
         user_id: user.id,
         strava_activity_id: activity.id,
-        workout_id: existing.id,
+        workout_id: existingStrava.id,
       })
       skipped++
       continue
     }
 
-    // Determine if activity falls within active plan date range
+    // No planned workout and no existing import — create new workout
     const planId =
       activePlan &&
       activityDate >= activePlan.start_date &&
@@ -141,7 +165,6 @@ export async function POST(request: NextRequest) {
 
     const workout = stravaActivityToWorkout(activity, user.id, planId ?? undefined)
 
-    // Insert workout
     const { data: newWorkout, error: workoutError } = await supabase
       .from("workouts")
       .insert(workout)
@@ -153,7 +176,6 @@ export async function POST(request: NextRequest) {
       continue
     }
 
-    // Record synced activity
     await supabase.from("strava_synced_activities").insert({
       user_id: user.id,
       strava_activity_id: activity.id,
@@ -172,6 +194,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     success: true,
     imported,
+    matched,  // planned workouts completed via Strava
     skipped,
     total: runs.length,
     totalActivities: activities.length,
