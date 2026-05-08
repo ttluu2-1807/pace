@@ -73,6 +73,7 @@ export default async function IntegrationsPage({
         athleteName={stravaConnection?.athlete_name}
         profileUrl={stravaConnection?.athlete_profile_url}
         lastSyncedAt={stravaConnection?.last_synced_at}
+        autoSync={params.connected === "strava"}
       />
 
       {/* Coming soon */}

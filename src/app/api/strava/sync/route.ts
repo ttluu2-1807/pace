@@ -53,10 +53,11 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Fetch activities since last sync (or last 90 days if first sync)
+  // Fetch activities since last sync (or last 365 days if first sync)
+  const isFirstSync = !connection.last_synced_at
   const afterDate = connection.last_synced_at
     ? new Date(connection.last_synced_at)
-    : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+    : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
   const afterTimestamp = Math.floor(afterDate.getTime() / 1000)
 
   let activities
@@ -70,13 +71,16 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Filter to runs only
+  // Filter to runs only — cover all Strava run sport_types
+  const RUN_TYPES = new Set([
+    "Run", "TrailRun", "VirtualRun", "Treadmill",
+    "MountainBikeRide", // exclude — not a run
+  ])
+  const RUN_SPORT_TYPES = new Set([
+    "Run", "TrailRun", "VirtualRun", "Treadmill",
+  ])
   const runs = activities.filter(
-    (a) =>
-      a.type === "Run" ||
-      a.type === "TrailRun" ||
-      a.sport_type === "Run" ||
-      a.sport_type === "TrailRun"
+    (a) => RUN_SPORT_TYPES.has(a.sport_type) || (a.sport_type === "" && RUN_TYPES.has(a.type))
   )
 
   // Fetch already-synced activity IDs to avoid duplicates
@@ -170,5 +174,8 @@ export async function POST(request: NextRequest) {
     imported,
     skipped,
     total: runs.length,
+    totalActivities: activities.length,
+    isFirstSync,
+    activityTypes: [...new Set(activities.map((a) => a.sport_type || a.type))],
   })
 }

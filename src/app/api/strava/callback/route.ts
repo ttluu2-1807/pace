@@ -59,12 +59,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Trigger initial sync in the background
-    fetch(`${baseUrl}/api/strava/sync`, {
-      method: "POST",
-      headers: { Cookie: request.headers.get("cookie") ?? "" },
-    }).catch((e) => console.error("[Strava] background sync failed:", e))
-
+    // Redirect to integrations page — client will auto-trigger sync
     return NextResponse.redirect(
       `${baseUrl}/settings/integrations?connected=strava`
     )
