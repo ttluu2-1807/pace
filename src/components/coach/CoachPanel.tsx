@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState, useRef, useEffect, useCallback } from "react"
-import { X, Send, Zap } from "lucide-react"
+import { X, Send, Zap, Mic, MicOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -25,14 +25,36 @@ const STARTER_QUESTIONS = [
   "My legs feel sore — is that normal?",
 ]
 
+// webkit SpeechRecognition fallback (types provided by @types/dom-speech-recognition)
+declare global {
+  interface Window {
+    webkitSpeechRecognition: typeof SpeechRecognition
+  }
+}
+
 export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [streamingMessage, setStreamingMessage] = useState("")
   const [unavailable, setUnavailable] = useState(false)
+
+  // Speech-to-text state
+  const [isListening, setIsListening] = useState(false)
+  const [speechSupported, setSpeechSupported] = useState(false)
+  const [interimTranscript, setInterimTranscript] = useState("")
+  const recognitionRef = useRef<SpeechRecognition | null>(null)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // Check for speech recognition support on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition)
+      setSpeechSupported(supported)
+    }
+  }, [])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -46,9 +68,80 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
     }
   }, [isOpen])
 
+  // Stop recognition when panel closes
+  useEffect(() => {
+    if (!isOpen && isListening) {
+      recognitionRef.current?.stop()
+    }
+  }, [isOpen, isListening])
+
+  function toggleListening() {
+    if (isListening) {
+      recognitionRef.current?.stop()
+      return
+    }
+
+    const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognitionAPI) return
+
+    const recognition = new SpeechRecognitionAPI()
+    recognition.continuous = false
+    recognition.interimResults = true
+    recognition.lang = "en-US"
+
+    recognition.onstart = () => {
+      setIsListening(true)
+      setInterimTranscript("")
+    }
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let interim = ""
+      let final = ""
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          final += transcript
+        } else {
+          interim += transcript
+        }
+      }
+
+      if (final) {
+        setInput((prev) => (prev ? `${prev} ${final}` : final).trim())
+        setInterimTranscript("")
+      } else {
+        setInterimTranscript(interim)
+      }
+    }
+
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      if (event.error !== "aborted") {
+        console.error("[SpeechRecognition] error:", event.error)
+      }
+      setIsListening(false)
+      setInterimTranscript("")
+    }
+
+    recognition.onend = () => {
+      setIsListening(false)
+      setInterimTranscript("")
+      // Focus back to textarea after mic
+      setTimeout(() => textareaRef.current?.focus(), 50)
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+  }
+
   const sendMessage = useCallback(
     async (userMessage: string) => {
       if (!userMessage.trim() || isLoading) return
+
+      // Stop mic if still listening
+      if (isListening) {
+        recognitionRef.current?.stop()
+      }
 
       const userMsg: Message = {
         id: Date.now().toString(),
@@ -58,6 +151,7 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
 
       setMessages((prev) => [...prev, userMsg])
       setInput("")
+      setInterimTranscript("")
       setIsLoading(true)
       setStreamingMessage("")
 
@@ -130,7 +224,7 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
         setIsLoading(false)
       }
     },
-    [messages, userId, isLoading]
+    [messages, userId, isLoading, isListening]
   )
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -143,6 +237,13 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
   const hasMessages = messages.length > 0
 
   if (!isOpen) return null
+
+  // The display value shows interim transcript inline while speaking
+  const displayValue = isListening && interimTranscript
+    ? input
+      ? `${input} ${interimTranscript}`
+      : interimTranscript
+    : input
 
   return (
     <>
@@ -157,9 +258,7 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
       <div
         className={cn(
           "fixed z-50 flex flex-col bg-background border shadow-xl",
-          // Mobile: full-width slide-up sheet
           "inset-x-0 bottom-0 rounded-t-2xl max-h-[70vh]",
-          // Desktop: fixed bottom-right panel
           "md:inset-x-auto md:bottom-20 md:right-6 md:rounded-xl md:w-[400px] md:max-h-[70vh]"
         )}
         role="dialog"
@@ -174,7 +273,11 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
             <div>
               <p className="text-sm font-semibold leading-tight">PACE Coach</p>
               <p className="text-xs text-muted-foreground leading-tight">
-                {isLoading ? "Thinking..." : "Your personal running coach"}
+                {isListening
+                  ? "Listening…"
+                  : isLoading
+                  ? "Thinking..."
+                  : "Your personal running coach"}
               </p>
             </div>
           </div>
@@ -237,7 +340,6 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
             </div>
           ))}
 
-          {/* Streaming message */}
           {streamingMessage && (
             <div className="flex justify-start">
               <div className="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-muted text-foreground">
@@ -246,7 +348,6 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
             </div>
           )}
 
-          {/* Thinking skeleton */}
           {isLoading && !streamingMessage && (
             <div className="flex justify-start">
               <div className="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 bg-muted">
@@ -267,20 +368,57 @@ export function CoachPanel({ isOpen, onClose, userId, userName }: CoachPanelProp
 
         {/* Input area */}
         <div className="border-t px-3 py-3 shrink-0">
+          {/* Listening indicator */}
+          {isListening && (
+            <div className="flex items-center gap-2 mb-2 px-1">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+              </span>
+              <span className="text-xs text-red-500 font-medium">
+                {interimTranscript ? `"${interimTranscript}"` : "Listening — speak now…"}
+              </span>
+            </div>
+          )}
+
           <div className="flex items-end gap-2">
+            {/* Mic button */}
+            {speechSupported && (
+              <Button
+                onClick={toggleListening}
+                disabled={isLoading || unavailable}
+                size="icon"
+                variant={isListening ? "destructive" : "outline"}
+                aria-label={isListening ? "Stop recording" : "Start voice input"}
+                className={cn(
+                  "shrink-0 transition-all",
+                  isListening && "ring-2 ring-red-400 ring-offset-1"
+                )}
+              >
+                {isListening ? (
+                  <MicOff className="h-4 w-4" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </Button>
+            )}
+
             <textarea
               ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
+              value={displayValue}
+              onChange={(e) => {
+                if (!isListening) setInput(e.target.value)
+              }}
               onKeyDown={handleKeyDown}
-              placeholder="Ask your coach anything..."
+              placeholder={isListening ? "Speak now…" : "Ask your coach anything..."}
               rows={1}
               disabled={isLoading || unavailable}
               className={cn(
                 "flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm",
                 "placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring",
                 "disabled:opacity-50 disabled:cursor-not-allowed",
-                "max-h-28 overflow-y-auto"
+                "max-h-28 overflow-y-auto",
+                isListening && "border-red-300 dark:border-red-700"
               )}
               style={{ minHeight: "38px" }}
             />
